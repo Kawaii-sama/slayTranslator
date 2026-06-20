@@ -560,6 +560,18 @@ body {
   background: rgba(16,185,129,0.08);
 }
 
+.icon-btn.speaking {
+  color: var(--pink-500);
+  border-color: rgba(251,111,146,0.35);
+  background: rgba(251,111,146,0.08);
+  animation: speaking-pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes speaking-pulse {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.1); }
+}
+
 /* ── Action Strip ── */
 .action-strip {
   padding: 14px 24px;

@@ -342,21 +342,26 @@ async function doTranslate(text) {
   translateBtn.disabled = true;
   translateBtn.classList.add('loading');
 
-  const pair = `${sourceLang === 'auto' ? 'autodetect' : sourceLang}|${targetLang}`;
-  const url  = `https://api.mymemory.translated.net/get?q=${encodeURIComponent(text)}&langpair=${pair}`;
+  const sl  = sourceLang === 'auto' ? 'auto' : sourceLang;
+  const url = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=${sl}&tl=${targetLang}&dt=t&q=${encodeURIComponent(text)}`;
 
   try {
     const res  = await fetch(url);
     if (!res.ok) throw new Error('Network error');
     const data = await res.json();
 
-    if (data.responseStatus === 200) {
-      const translated = data.responseData.translatedText;
+    // Google returns nested arrays: data[0] = [[translated, original], ...]
+    const translated = data[0]
+      .map(chunk => chunk[0])
+      .filter(Boolean)
+      .join('');
+
+    if (translated) {
       targetTextarea.value = translated;
       setStatus('ready', 'Translation complete ♡');
       addToHistory(text, translated);
     } else {
-      throw new Error(data.responseDetails || 'Translation failed');
+      throw new Error('Empty translation');
     }
   } catch (err) {
     console.error(err);

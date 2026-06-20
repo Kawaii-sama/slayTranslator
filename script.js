@@ -349,71 +349,139 @@ async function doTranslate(text) {
   translateBtn.disabled = true;
   translateBtn.classList.add('loading');
 
-  const sl  = sourceLang === 'auto' ? 'auto' : sourceLang;
+  // If source lang is Hindi but they typed in Latin script, treat as auto to allow Hinglish detection
+  let sl = sourceLang === 'auto' ? 'auto' : sourceLang;
+  const hasDevanagari = /[\u0900-\u097F]/.test(text);
+  if (sl === 'hi' && !hasDevanagari) {
+    sl = 'auto';
+  }
 
-  try {
-    // ── Primary: Google Translate (gtx free endpoint) ──
-    const gtxUrl = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=${sl}&tl=${targetLang}&dt=t&q=${encodeURIComponent(text)}`;
-    const res    = await fetch(gtxUrl);
-    if (!res.ok) throw new Error('gtx network error');
-    const data = await res.json();
+  // Multi-endpoint Google Translate array
+  const urls = [
+    `https://translate.googleapis.com/translate_a/single?client=gtx&sl=${sl}&tl=${targetLang}&dt=t&q=${encodeURIComponent(text)}`,
+    `https://translate.google.com/translate_a/single?client=gtx&sl=${sl}&tl=${targetLang}&dt=t&q=${encodeURIComponent(text)}`
+  ];
 
-    const translated = data[0]
-      .map(chunk => chunk[0])
-      .filter(Boolean)
-      .join('')
-      .trim();
+  let translated = '';
+  let success = false;
 
-    // If Google echoes back the same text (happens with Hinglish / non-Latin source)
-    // fall back to MyMemory which handles transliterated Hindi better
-    if (!translated || translated.toLowerCase() === text.toLowerCase()) {
-      throw new Error('identical_output');
+  for (const url of urls) {
+    try {
+      const res = await fetch(url);
+      if (!res.ok) continue;
+      const data = await res.json();
+      if (data && data[0]) {
+        translated = data[0]
+          .map(chunk => chunk[0])
+          .filter(Boolean)
+          .join('')
+          .trim();
+        
+        if (translated && translated.toLowerCase() !== text.trim().toLowerCase()) {
+          success = true;
+          break;
+        }
+      }
+    } catch (e) {
+      console.warn('Google Translate try failed:', e);
     }
+  }
 
+  // Fallback to MyMemory if Google fails or returns identical output
+  if (!success) {
+    try {
+      const mmSl = (sourceLang === 'hi' && !hasDevanagari) ? 'autodetect' : sl;
+      const pair = `${mmSl === 'auto' ? 'autodetect' : mmSl}|${targetLang}`;
+      const mmUrl = `https://api.mymemory.translated.net/get?q=${encodeURIComponent(text)}&langpair=${pair}`;
+      
+      const mmRes = await fetch(mmUrl);
+      if (mmRes.ok) {
+        const mmData = await mmRes.json();
+        if (mmData.responseStatus === 200) {
+          const mmTranslated = mmData.responseData.translatedText.trim();
+          if (mmTranslated && mmTranslated.toLowerCase() !== text.trim().toLowerCase()) {
+            translated = mmTranslated;
+            success = true;
+          }
+        }
+      }
+    } catch (e) {
+      console.error('MyMemory fallback failed:', e);
+    }
+  }
+
+  if (success && translated) {
     targetTextarea.value = translated;
     setStatus('ready', 'Translation complete ♡');
     addToHistory(text, translated);
     speakText(translated, targetLang);
-
-  } catch (primaryErr) {
-    // ── Fallback: MyMemory API ──
-    try {
-      const pair      = `${sl === 'auto' ? 'autodetect' : sl}|${targetLang}`;
-      const mmUrl     = `https://api.mymemory.translated.net/get?q=${encodeURIComponent(text)}&langpair=${pair}`;
-      const mmRes     = await fetch(mmUrl);
-      if (!mmRes.ok) throw new Error('mymemory network error');
-      const mmData    = await mmRes.json();
-
-      if (mmData.responseStatus === 200) {
-        const translated = mmData.responseData.translatedText.trim();
-        targetTextarea.value = translated;
-        setStatus('ready', 'Translation complete ♡');
-        addToHistory(text, translated);
-        speakText(translated, targetLang);
-      } else {
-        throw new Error(mmData.responseDetails || 'Translation failed');
-      }
-    } catch (err) {
-      console.error(err);
+  } else {
+    if (translated) {
+      targetTextarea.value = translated;
+      setStatus('ready', 'Translation complete ♡');
+      addToHistory(text, translated);
+    } else {
       setStatus('error', 'Translation failed');
       showToast('❌ Translation failed. Check your connection.', 'error');
       targetTextarea.value = '';
     }
-  } finally {
-    translateBtn.disabled = false;
-    translateBtn.classList.remove('loading');
   }
+
+  translateBtn.disabled = false;
+  translateBtn.classList.remove('loading');
 }
 
 // ─── Text-to-Speech ───────────────────────────────────────────────────────────
+function getFemaleVoice(langCode) {
+  if (!window.speechSynthesis) return null;
+  const voices = window.speechSynthesis.getVoices();
+  const targetLang = (SPEECH_LANG_MAP[langCode] || langCode).toLowerCase();
+  
+  const langVoices = voices.filter(v => 
+    v.lang.toLowerCase() === targetLang || 
+    v.lang.toLowerCase().startsWith(targetLang.split('-')[0])
+  );
+
+  if (langVoices.length === 0) return null;
+
+  // Key female voice names (English, Hindi, Spanish, general)
+  const femaleKeywords = [
+    'female', 'girl', 'woman', 'samantha', 'zira', 'karen', 'hazel', 
+    'moira', 'tessa', 'veena', 'susan', 'heera', 'kalpana', 'swara',
+    'monica', 'helena', 'paulina', 'laura', 'mei-jia', 'sin-ji', 
+    'anna', 'elena', 'victoria', 'kyoko', 'yuri', 'lekha', 'google'
+  ];
+
+  for (const keyword of femaleKeywords) {
+    const found = langVoices.find(v => v.name.toLowerCase().includes(keyword));
+    if (found) return found;
+  }
+
+  const nonMaleVoices = langVoices.filter(v => {
+    const name = v.name.toLowerCase();
+    return !name.includes('male') && !name.includes('guy') && !name.includes('man') && 
+           !name.includes('david') && !name.includes('george') && !name.includes('ravi');
+  });
+
+  if (nonMaleVoices.length > 0) return nonMaleVoices[0];
+  return langVoices[0];
+}
+
 function speakText(text, langCode) {
   if (!window.speechSynthesis || !text.trim()) return;
   stopSpeak();
 
   const utter  = new SpeechSynthesisUtterance(text);
-  utter.lang   = SPEECH_LANG_MAP[langCode] || langCode;
+  const voice = getFemaleVoice(langCode);
+  if (voice) {
+    utter.voice = voice;
+    utter.lang  = voice.lang;
+  } else {
+    utter.lang  = SPEECH_LANG_MAP[langCode] || langCode;
+  }
+
   utter.rate   = 0.95;
-  utter.pitch  = 1;
+  utter.pitch  = 1.05; // Slightly higher pitch for a cute female tone
 
   utter.onstart = () => {
     isSpeaking = true;

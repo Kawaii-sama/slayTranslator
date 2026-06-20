@@ -78,6 +78,10 @@ const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecogni
 let recognition   = null;
 let isRecording   = false;
 
+// TTS
+let currentUtterance = null;
+let isSpeaking       = false;
+
 // ─── DOM Refs ─────────────────────────────────────────────────────────────────
 const $  = id => document.getElementById(id);
 const sourceSelect   = $('source-select');
@@ -91,6 +95,7 @@ const charCount      = $('char-count');
 const clearSourceBtn = $('clear-source-btn');
 const copySrcBtn     = $('copy-src-btn');
 const copyTgtBtn     = $('copy-tgt-btn');
+const speakTgtBtn    = $('speak-tgt-btn');
 const translateBtn   = $('translate-btn');
 const statusPill     = $('status-pill');
 const statusDot      = $('status-dot');
@@ -119,6 +124,7 @@ function init() {
   clearSourceBtn.addEventListener('click', clearSource);
   copySrcBtn.addEventListener('click', () => copyText(sourceTextarea.value, '✿ Source text copied!'));
   copyTgtBtn.addEventListener('click', () => copyText(targetTextarea.value, '♡ Translation copied!'));
+  speakTgtBtn.addEventListener('click', toggleSpeak);
   translateBtn.addEventListener('click', () => doTranslate(sourceTextarea.value));
   clearHistoryBtn.addEventListener('click', clearHistory);
 }
@@ -338,39 +344,108 @@ function clearSource() {
 async function doTranslate(text) {
   if (!text.trim()) return;
 
+  stopSpeak(); // cancel any ongoing TTS
   setStatus('loading', 'Translating…');
   translateBtn.disabled = true;
   translateBtn.classList.add('loading');
 
   const sl  = sourceLang === 'auto' ? 'auto' : sourceLang;
-  const url = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=${sl}&tl=${targetLang}&dt=t&q=${encodeURIComponent(text)}`;
 
   try {
-    const res  = await fetch(url);
-    if (!res.ok) throw new Error('Network error');
+    // ── Primary: Google Translate (gtx free endpoint) ──
+    const gtxUrl = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=${sl}&tl=${targetLang}&dt=t&q=${encodeURIComponent(text)}`;
+    const res    = await fetch(gtxUrl);
+    if (!res.ok) throw new Error('gtx network error');
     const data = await res.json();
 
-    // Google returns nested arrays: data[0] = [[translated, original], ...]
     const translated = data[0]
       .map(chunk => chunk[0])
       .filter(Boolean)
-      .join('');
+      .join('')
+      .trim();
 
-    if (translated) {
-      targetTextarea.value = translated;
-      setStatus('ready', 'Translation complete ♡');
-      addToHistory(text, translated);
-    } else {
-      throw new Error('Empty translation');
+    // If Google echoes back the same text (happens with Hinglish / non-Latin source)
+    // fall back to MyMemory which handles transliterated Hindi better
+    if (!translated || translated.toLowerCase() === text.toLowerCase()) {
+      throw new Error('identical_output');
     }
-  } catch (err) {
-    console.error(err);
-    setStatus('error', 'Translation failed');
-    showToast('❌ Translation failed. Check your connection.', 'error');
-    targetTextarea.value = '';
+
+    targetTextarea.value = translated;
+    setStatus('ready', 'Translation complete ♡');
+    addToHistory(text, translated);
+    speakText(translated, targetLang);
+
+  } catch (primaryErr) {
+    // ── Fallback: MyMemory API ──
+    try {
+      const pair      = `${sl === 'auto' ? 'autodetect' : sl}|${targetLang}`;
+      const mmUrl     = `https://api.mymemory.translated.net/get?q=${encodeURIComponent(text)}&langpair=${pair}`;
+      const mmRes     = await fetch(mmUrl);
+      if (!mmRes.ok) throw new Error('mymemory network error');
+      const mmData    = await mmRes.json();
+
+      if (mmData.responseStatus === 200) {
+        const translated = mmData.responseData.translatedText.trim();
+        targetTextarea.value = translated;
+        setStatus('ready', 'Translation complete ♡');
+        addToHistory(text, translated);
+        speakText(translated, targetLang);
+      } else {
+        throw new Error(mmData.responseDetails || 'Translation failed');
+      }
+    } catch (err) {
+      console.error(err);
+      setStatus('error', 'Translation failed');
+      showToast('❌ Translation failed. Check your connection.', 'error');
+      targetTextarea.value = '';
+    }
   } finally {
     translateBtn.disabled = false;
     translateBtn.classList.remove('loading');
+  }
+}
+
+// ─── Text-to-Speech ───────────────────────────────────────────────────────────
+function speakText(text, langCode) {
+  if (!window.speechSynthesis || !text.trim()) return;
+  stopSpeak();
+
+  const utter  = new SpeechSynthesisUtterance(text);
+  utter.lang   = SPEECH_LANG_MAP[langCode] || langCode;
+  utter.rate   = 0.95;
+  utter.pitch  = 1;
+
+  utter.onstart = () => {
+    isSpeaking = true;
+    speakTgtBtn.classList.add('speaking');
+    speakTgtBtn.title = 'Stop speaking';
+  };
+  utter.onend = utter.onerror = () => {
+    isSpeaking = false;
+    speakTgtBtn.classList.remove('speaking');
+    speakTgtBtn.title = 'Speak translation';
+    currentUtterance  = null;
+  };
+
+  currentUtterance = utter;
+  window.speechSynthesis.speak(utter);
+}
+
+function stopSpeak() {
+  if (window.speechSynthesis) window.speechSynthesis.cancel();
+  isSpeaking = false;
+  if (speakTgtBtn) {
+    speakTgtBtn.classList.remove('speaking');
+    speakTgtBtn.title = 'Speak translation';
+  }
+  currentUtterance = null;
+}
+
+function toggleSpeak() {
+  if (isSpeaking) {
+    stopSpeak();
+  } else {
+    speakText(targetTextarea.value, targetLang);
   }
 }
 
